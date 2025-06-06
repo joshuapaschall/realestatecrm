@@ -1,9 +1,12 @@
 import { createClient } from "@supabase/supabase-js"
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+// Temporary hardcoded values for testing
+const supabaseUrl = "https://utbomztujqqagkyyxgpu.supabase.co"
+const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV0Ym9tenR1anFxYWdreXl4Z3B1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg0NTczMjEsImV4cCI6MjA2NDAzMzMyMX0.yCXqAMLigZ07u0lHdOpWyxDvmf9JWpfzr6-EFs3r-ac"
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+
+// Rest of your existing code...
 
 // Types based on your existing database schema
 export interface Buyer {

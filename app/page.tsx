@@ -6,11 +6,11 @@ import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { Card } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { BuyerService } from "@/services/buyer-service"
+import { supabase } from "@/lib/supabase"
 import type { Buyer, Tag, Group } from "@/lib/supabase"
+import ImportBuyersModal from "@/components/buyers/import-buyers-modal"
 import {
   ChevronDown,
   ChevronRight,
@@ -35,7 +35,11 @@ import {
   Target,
   Edit,
   Loader2,
+  MapPin,
 } from "lucide-react"
+
+import TagFilterSelector from "@/components/buyers/tag-filter-selector"
+import LocationFilterSelector from "@/components/buyers/location-filter-selector"
 
 // Smart groups structure
 const smartGroupsStructure = [
@@ -102,18 +106,18 @@ export default function BuyersPage() {
   // Active filters state
   const [filters, setFilters] = useState({
     search: "",
-    location: "",
-    tags: "",
-    excludeTags: "",
+    selectedTags: [] as string[],
+    excludedTags: [] as string[],
+    selectedLocations: [] as string[],
     propertyTypes: "",
     minScore: "",
     maxScore: "",
     createdAfter: "",
     createdBefore: "",
-    vip: "",
-    vetted: "",
-    canEmail: "",
-    canSms: "",
+    vip: "any",
+    vetted: "any",
+    canEmail: "any",
+    canSms: "any",
   })
 
   // Load data from Supabase
@@ -127,16 +131,12 @@ export default function BuyersPage() {
       setError(null)
 
       // Load buyers, tags, and groups in parallel
-      const [buyersData, tagsData, groupsData] = await Promise.all([
-        BuyerService.getBuyers(),
-        BuyerService.getTags(),
-        BuyerService.getGroups(),
-      ])
+      const [buyersData, tagsData, groupsData] = await Promise.all([fetchBuyers(), fetchTags(), fetchGroups()])
 
       setBuyers(buyersData)
       setTags(tagsData)
       setGroups(groupsData)
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error loading data:", err)
       setError("Failed to load data. Please check your connection.")
     } finally {
@@ -144,7 +144,28 @@ export default function BuyersPage() {
     }
   }
 
-  // Filter buyers based on current filters
+  const fetchBuyers = async () => {
+    const { data, error } = await supabase.from("buyers").select("*").order("created_at", { ascending: false })
+
+    if (error) throw error
+    return data || []
+  }
+
+  const fetchTags = async () => {
+    const { data, error } = await supabase.from("tags").select("*").order("name")
+
+    if (error) throw error
+    return data || []
+  }
+
+  const fetchGroups = async () => {
+    const { data, error } = await supabase.from("groups").select("*").order("name")
+
+    if (error) throw error
+    return data || []
+  }
+
+  // Enhanced filter function with proper tag and location filtering
   const filteredBuyers = buyers.filter((buyer) => {
     // Search filter
     if (filters.search) {
@@ -153,8 +174,37 @@ export default function BuyersPage() {
         buyer.fname?.toLowerCase().includes(searchTerm) ||
         buyer.lname?.toLowerCase().includes(searchTerm) ||
         buyer.email?.toLowerCase().includes(searchTerm) ||
-        buyer.phone?.toLowerCase().includes(searchTerm)
+        buyer.phone?.toLowerCase().includes(searchTerm) ||
+        buyer.company?.toLowerCase().includes(searchTerm)
       if (!matchesSearch) return false
+    }
+
+    // Include tags filter
+    if (filters.selectedTags && filters.selectedTags.length > 0) {
+      const hasRequiredTags = filters.selectedTags.every((requiredTag) =>
+        buyer.tags?.some((buyerTag) => buyerTag.toLowerCase().includes(requiredTag.toLowerCase())),
+      )
+      if (!hasRequiredTags) return false
+    }
+
+    // Exclude tags filter
+    if (filters.excludedTags && filters.excludedTags.length > 0) {
+      const hasExcludedTag = filters.excludedTags.some((excludedTag) =>
+        buyer.tags?.some((buyerTag) => buyerTag.toLowerCase().includes(excludedTag.toLowerCase())),
+      )
+      if (hasExcludedTag) return false
+    }
+
+    // Location filter
+    if (filters.selectedLocations && filters.selectedLocations.length > 0) {
+      const hasRequiredLocation = filters.selectedLocations.some(
+        (requiredLocation) =>
+          buyer.mailing_city?.toLowerCase().includes(requiredLocation.toLowerCase()) ||
+          buyer.mailing_state?.toLowerCase().includes(requiredLocation.toLowerCase()) ||
+          buyer.mailing_address?.toLowerCase().includes(requiredLocation.toLowerCase()) ||
+          buyer.locations?.some((loc) => loc.toLowerCase().includes(requiredLocation.toLowerCase())),
+      )
+      if (!hasRequiredLocation) return false
     }
 
     // VIP filter
@@ -165,6 +215,12 @@ export default function BuyersPage() {
     if (filters.vetted === "vetted" && !buyer.vetted) return false
     if (filters.vetted === "not-vetted" && buyer.vetted) return false
 
+    // Email/SMS preferences
+    if (filters.canEmail === "yes" && !buyer.can_receive_email) return false
+    if (filters.canEmail === "no" && buyer.can_receive_email) return false
+    if (filters.canSms === "yes" && !buyer.can_receive_sms) return false
+    if (filters.canSms === "no" && buyer.can_receive_sms) return false
+
     // Score filters
     if (filters.minScore && buyer.score < Number.parseInt(filters.minScore)) return false
     if (filters.maxScore && buyer.score > Number.parseInt(filters.maxScore)) return false
@@ -172,6 +228,37 @@ export default function BuyersPage() {
     // Quick filters
     if (activeQuickFilters.includes("vip") && !buyer.vip) return false
     if (activeQuickFilters.includes("highScore") && buyer.score < 80) return false
+    if (activeQuickFilters.includes("hot") && buyer.score < 85) return false
+    if (activeQuickFilters.includes("new")) {
+      const weekAgo = new Date()
+      weekAgo.setDate(weekAgo.getDate() - 7)
+      const createdDate = new Date(buyer.created_at)
+      if (createdDate < weekAgo) return false
+    }
+
+    // Smart group filters
+    if (selectedGroup) {
+      switch (selectedGroup) {
+        case "vip":
+          if (!buyer.vip) return false
+          break
+        case "high-value":
+          if (buyer.score < 80) return false
+          break
+        case "hot":
+          if (buyer.score < 85) return false
+          break
+        case "investor":
+          if (!buyer.tags?.some((tag) => tag.toLowerCase().includes("investor"))) return false
+          break
+        case "cash-buyer":
+          if (!buyer.tags?.some((tag) => tag.toLowerCase().includes("cash"))) return false
+          break
+        case "wholesaler":
+          if (!buyer.tags?.some((tag) => tag.toLowerCase().includes("wholesaler"))) return false
+          break
+      }
+    }
 
     return true
   })
@@ -210,20 +297,21 @@ export default function BuyersPage() {
   const clearAllFilters = () => {
     setFilters({
       search: "",
-      location: "",
-      tags: "",
-      excludeTags: "",
+      selectedTags: [],
+      excludedTags: [],
+      selectedLocations: [],
       propertyTypes: "",
       minScore: "",
       maxScore: "",
       createdAfter: "",
       createdBefore: "",
-      vip: "",
-      vetted: "",
-      canEmail: "",
-      canSms: "",
+      vip: "any",
+      vetted: "any",
+      canEmail: "any",
+      canSms: "any",
     })
     setActiveQuickFilters([])
+    setSelectedGroup(null)
   }
 
   const toggleFolder = (folderId: string) => {
@@ -349,18 +437,23 @@ export default function BuyersPage() {
                       let count = 0
                       if (group.id === "vip") count = buyers.filter((b) => b.vip).length
                       else if (group.id === "high-value") count = buyers.filter((b) => b.score >= 80).length
+                      else if (group.id === "hot") count = buyers.filter((b) => b.score >= 85).length
                       else if (group.id === "investor")
-                        count = buyers.filter((b) => b.tags?.includes("Investor")).length
+                        count = buyers.filter((b) =>
+                          b.tags?.some((tag) => tag.toLowerCase().includes("investor")),
+                        ).length
                       else if (group.id === "cash-buyer")
-                        count = buyers.filter((b) => b.tags?.includes("Cash Buyer")).length
+                        count = buyers.filter((b) => b.tags?.some((tag) => tag.toLowerCase().includes("cash"))).length
                       else if (group.id === "wholesaler")
-                        count = buyers.filter((b) => b.tags?.includes("Wholesaler")).length
+                        count = buyers.filter((b) =>
+                          b.tags?.some((tag) => tag.toLowerCase().includes("wholesaler")),
+                        ).length
 
                       return (
                         <Button
                           key={group.id}
                           variant="ghost"
-                          onClick={() => setSelectedGroup(group.id)}
+                          onClick={() => setSelectedGroup(selectedGroup === group.id ? null : group.id)}
                           className={`w-full justify-between h-9 px-3 group transition-all duration-200 ${
                             selectedGroup === group.id
                               ? "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border-l-2 border-blue-500"
@@ -398,6 +491,10 @@ export default function BuyersPage() {
                 <span className="font-medium">{buyers.length}</span>
               </div>
               <div className="flex justify-between">
+                <span>Filtered:</span>
+                <span className="font-medium">{filteredBuyers.length}</span>
+              </div>
+              <div className="flex justify-between">
                 <span>Active Groups:</span>
                 <span className="font-medium">{groups.length}</span>
               </div>
@@ -415,16 +512,17 @@ export default function BuyersPage() {
                 <Badge variant="secondary" className="text-sm">
                   {filteredBuyers.length} results
                 </Badge>
-                {(Object.values(filters).some((v) => v !== "") || activeQuickFilters.length > 0) && (
+                {(Object.values(filters).some((v) => v !== "") || activeQuickFilters.length > 0 || selectedGroup) && (
                   <Badge variant="outline" className="text-sm">
-                    {Object.values(filters).filter((v) => v !== "").length + activeQuickFilters.length} filters applied
+                    {Object.values(filters).filter((v) => v !== "").length +
+                      activeQuickFilters.length +
+                      (selectedGroup ? 1 : 0)}{" "}
+                    filters applied
                   </Badge>
                 )}
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" className="border-green-200 text-green-700 hover:bg-green-50">
-                  <FileUp className="mr-1 h-4 w-4" /> Import CSV
-                </Button>
+                <ImportBuyersModal onSuccess={loadData} />
                 <Button variant="outline" className="border-blue-200 text-blue-700 hover:bg-blue-50">
                   <FileUp className="mr-1 h-4 w-4" /> Export List
                 </Button>
@@ -468,25 +566,6 @@ export default function BuyersPage() {
               </div>
             )}
 
-            {/* Import CSV */}
-            <Card className="p-4 mb-6 border border-dashed border-green-300 bg-green-50/50 hover:bg-green-50 transition-colors cursor-pointer">
-              <div className="text-center">
-                <FileUp className="mx-auto h-8 w-8 text-green-600 mb-2" />
-                <p className="font-medium text-green-800">📤 Import Buyers</p>
-                <p className="text-sm text-green-600 mb-3">
-                  Drag CSV file here or click to browse • Supports: Name, Email, Phone, Tags
-                </p>
-                <div className="flex justify-center space-x-2">
-                  <Button variant="outline" size="sm" className="border-green-300 text-green-700 hover:bg-green-100">
-                    Select File
-                  </Button>
-                  <Button variant="ghost" size="sm" className="text-green-600 hover:bg-green-100">
-                    Download Template
-                  </Button>
-                </div>
-              </div>
-            </Card>
-
             {/* Quick Filter Chips */}
             <div className="flex flex-wrap gap-2 mb-4">
               {quickFilters.map((filter) => (
@@ -501,6 +580,17 @@ export default function BuyersPage() {
                   {activeQuickFilters.includes(filter.key) && <X className="ml-1 h-3 w-3" />}
                 </Button>
               ))}
+              {selectedGroup && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => setSelectedGroup(null)}
+                  className="h-7 bg-blue-600 hover:bg-blue-700"
+                >
+                  {smartGroupsStructure.flatMap((f) => f.groups).find((g) => g.id === selectedGroup)?.name}
+                  <X className="ml-1 h-3 w-3" />
+                </Button>
+              )}
             </div>
 
             {/* Filter Toggle */}
@@ -518,7 +608,7 @@ export default function BuyersPage() {
               </div>
             </div>
 
-            {/* Advanced Filters */}
+            {/* Advanced Filters - Rearranged to match original layout */}
             {showAdvancedFilters && (
               <div className="space-y-4 p-4 border rounded-lg bg-muted/20">
                 {/* Search and Location */}
@@ -528,7 +618,7 @@ export default function BuyersPage() {
                     <div className="relative">
                       <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                       <Input
-                        placeholder="Search by name, phone, or email"
+                        placeholder="Search by name, phone, email, or company"
                         className="pl-9"
                         value={filters.search}
                         onChange={(e) => setFilters((prev) => ({ ...prev, search: e.target.value }))}
@@ -547,72 +637,162 @@ export default function BuyersPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-muted-foreground mb-2">Location</label>
-                    <Input
-                      placeholder="Type a city, county, or state"
-                      value={filters.location || ""}
-                      onChange={(e) => setFilters((prev) => ({ ...prev, location: e.target.value }))}
+                    <LocationFilterSelector
+                      selectedLocations={filters.selectedLocations || []}
+                      onChange={(selectedLocations) => setFilters((prev) => ({ ...prev, selectedLocations }))}
+                      placeholder="Select locations to filter by..."
                     />
                   </div>
                 </div>
 
-                {/* Tags and Property Type */}
+                {/* Tags and Exclude Tags */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-muted-foreground mb-2">Tags</label>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Include Tags</label>
+                    <TagFilterSelector
+                      availableTags={tags}
+                      selectedTags={filters.selectedTags || []}
+                      onChange={(selectedTags) => setFilters((prev) => ({ ...prev, selectedTags }))}
+                      placeholder="Select tags to include..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Exclude Tags</label>
+                    <TagFilterSelector
+                      availableTags={tags}
+                      selectedTags={filters.excludedTags || []}
+                      onChange={(selectedTags) => setFilters((prev) => ({ ...prev, excludedTags: selectedTags }))}
+                      placeholder="Select tags to exclude..."
+                      variant="exclude"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Property Type</label>
                     <Select
-                      value={filters.tags}
-                      onValueChange={(value) => setFilters((prev) => ({ ...prev, tags: value }))}
+                      value={filters.propertyTypes || "any"} // Updated default value to "any"
+                      onValueChange={(value) => setFilters((prev) => ({ ...prev, propertyTypes: value }))}
                     >
                       <SelectTrigger>
-                        <SelectValue placeholder="Select tags" />
+                        <SelectValue placeholder="Any property type" />
                       </SelectTrigger>
                       <SelectContent>
-                        {tags.map((tag) => (
-                          <SelectItem key={tag.id} value={tag.name}>
-                            {tag.name}
-                          </SelectItem>
-                        ))}
+                        <SelectItem value="any">Any property type</SelectItem>
+                        <SelectItem value="single_family">Single Family</SelectItem>
+                        <SelectItem value="multi_family">Multi-Family</SelectItem>
+                        <SelectItem value="commercial">Commercial</SelectItem>
+                        <SelectItem value="land">Land</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {/* Min/Max Score and Created After/Before */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Min Score</label>
+                    <Input
+                      type="number"
+                      placeholder="0"
+                      min="0"
+                      max="100"
+                      value={filters.minScore}
+                      onChange={(e) => setFilters((prev) => ({ ...prev, minScore: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Max Score</label>
+                    <Input
+                      type="number"
+                      placeholder="100"
+                      min="0"
+                      max="100"
+                      value={filters.maxScore}
+                      onChange={(e) => setFilters((prev) => ({ ...prev, maxScore: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Created After</label>
+                    <Input
+                      type="date"
+                      value={filters.createdAfter}
+                      onChange={(e) => setFilters((prev) => ({ ...prev, createdAfter: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Created Before</label>
+                    <Input
+                      type="date"
+                      value={filters.createdBefore}
+                      onChange={(e) => setFilters((prev) => ({ ...prev, createdBefore: e.target.value }))}
+                    />
+                  </div>
+                </div>
+
+                {/* Status Filters */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">VIP Status</label>
+                    <Select
+                      value={filters.vip || "any"} // Updated default value to "any"
+                      onValueChange={(value) => setFilters((prev) => ({ ...prev, vip: value }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Any" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="any">Any</SelectItem>
+                        <SelectItem value="vip">VIP Only</SelectItem>
+                        <SelectItem value="not-vip">Not VIP</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-muted-foreground mb-2">Score Range</label>
-                    <div className="flex space-x-2">
-                      <Input
-                        type="number"
-                        placeholder="Min"
-                        min="0"
-                        max="100"
-                        value={filters.minScore}
-                        onChange={(e) => setFilters((prev) => ({ ...prev, minScore: e.target.value }))}
-                      />
-                      <Input
-                        type="number"
-                        placeholder="Max"
-                        min="0"
-                        max="100"
-                        value={filters.maxScore}
-                        onChange={(e) => setFilters((prev) => ({ ...prev, maxScore: e.target.value }))}
-                      />
-                    </div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Vetted Status</label>
+                    <Select
+                      value={filters.vetted || "any"} // Updated default value to "any"
+                      onValueChange={(value) => setFilters((prev) => ({ ...prev, vetted: value }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Any" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="any">Any</SelectItem>
+                        <SelectItem value="vetted">Vetted Only</SelectItem>
+                        <SelectItem value="not-vetted">Not Vetted</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-muted-foreground mb-2">Status</label>
-                    <div className="flex space-x-2">
-                      <Select
-                        value={filters.vip}
-                        onValueChange={(value) => setFilters((prev) => ({ ...prev, vip: value }))}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="VIP Status" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="any">Any</SelectItem>
-                          <SelectItem value="vip">VIP</SelectItem>
-                          <SelectItem value="not-vip">Not VIP</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Can Receive Email</label>
+                    <Select
+                      value={filters.canEmail || "any"} // Updated default value to "any"
+                      onValueChange={(value) => setFilters((prev) => ({ ...prev, canEmail: value }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Any" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="any">Any</SelectItem>
+                        <SelectItem value="yes">Yes</SelectItem>
+                        <SelectItem value="no">No</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Can Receive SMS</label>
+                    <Select
+                      value={filters.canSms || "any"} // Updated default value to "any"
+                      onValueChange={(value) => setFilters((prev) => ({ ...prev, canSms: value }))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Any" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="any">Any</SelectItem>
+                        <SelectItem value="yes">Yes</SelectItem>
+                        <SelectItem value="no">No</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
 
@@ -646,6 +826,8 @@ export default function BuyersPage() {
                   <th className="p-3 text-left font-medium">Email</th>
                   <th className="p-3 text-left font-medium">Phone</th>
                   <th className="p-3 text-left font-medium">Score</th>
+                  <th className="p-3 text-left font-medium">Tags</th>
+                  <th className="p-3 text-left font-medium">Locations</th>
                   <th className="p-3 text-left font-medium">Created</th>
                   <th className="p-3 text-left font-medium">Status</th>
                   <th className="p-3 text-left font-medium w-20">Actions</th>
@@ -663,24 +845,50 @@ export default function BuyersPage() {
                     <td className="p-3 font-medium sticky left-10 bg-background group-hover:bg-muted/30">
                       <div className="flex items-center justify-between min-w-0">
                         <div className="truncate mr-2 text-sm font-semibold text-gray-900">{formatName(buyer)}</div>
-                        <div className="flex flex-wrap gap-1 items-center">
-                          {buyer.tags?.slice(0, 2).map((tag, index) => (
-                            <Badge key={index} variant="outline" className="text-xs px-2 py-0.5 whitespace-nowrap">
-                              {tag}
-                            </Badge>
-                          ))}
-                          {buyer.tags && buyer.tags.length > 2 && (
-                            <Badge variant="outline" className="text-xs px-2 py-0.5">
-                              +{buyer.tags.length - 2}
-                            </Badge>
-                          )}
+                        <div className="flex items-center space-x-1">
+                          {buyer.vip && <Star className="h-4 w-4 text-amber-500 fill-amber-500" />}
+                          {buyer.vetted && <CheckCircle className="h-4 w-4 text-emerald-500" />}
                         </div>
                       </div>
+                      {buyer.company && <div className="text-xs text-muted-foreground">{buyer.company}</div>}
                     </td>
                     <td className="p-3">{buyer.email || "No email"}</td>
                     <td className="p-3 font-mono text-sm whitespace-nowrap">{buyer.phone || "No phone"}</td>
                     <td className="p-3">
                       <Badge className={`${getScoreColor(buyer.score)} border-0`}>{buyer.score}</Badge>
+                    </td>
+                    <td className="p-3">
+                      <div className="flex flex-wrap gap-1 max-w-48">
+                        {buyer.tags?.slice(0, 3).map((tag, index) => (
+                          <Badge key={index} variant="outline" className="text-xs px-2 py-0.5 whitespace-nowrap">
+                            {tag}
+                          </Badge>
+                        ))}
+                        {buyer.tags && buyer.tags.length > 3 && (
+                          <Badge variant="outline" className="text-xs px-2 py-0.5">
+                            +{buyer.tags.length - 3}
+                          </Badge>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      <div className="flex flex-wrap gap-1 max-w-48">
+                        {buyer.locations?.slice(0, 2).map((location, index) => (
+                          <Badge
+                            key={index}
+                            variant="secondary"
+                            className="text-xs px-2 py-0.5 whitespace-nowrap bg-blue-100 text-blue-800"
+                          >
+                            <MapPin className="h-3 w-3 mr-1" />
+                            {location}
+                          </Badge>
+                        ))}
+                        {buyer.locations && buyer.locations.length > 2 && (
+                          <Badge variant="secondary" className="text-xs px-2 py-0.5 bg-blue-100 text-blue-800">
+                            +{buyer.locations.length - 2}
+                          </Badge>
+                        )}
+                      </div>
                     </td>
                     <td className="p-3 text-sm text-muted-foreground font-mono whitespace-nowrap">
                       {formatDate(buyer.created_at)}
@@ -691,8 +899,6 @@ export default function BuyersPage() {
                           {buyer.status.charAt(0).toUpperCase() + buyer.status.slice(1)}
                         </Badge>
                         <div className="flex items-center space-x-2">
-                          {buyer.vip && <Star className="h-4 w-4 text-amber-500 fill-amber-500" />}
-                          {buyer.vetted && <CheckCircle className="h-4 w-4 text-emerald-500" />}
                           {buyer.can_receive_email && <Mail className="h-4 w-4 text-blue-500" />}
                           {buyer.can_receive_sms && <MessageSquare className="h-4 w-4 text-purple-500" />}
                         </div>
@@ -749,6 +955,11 @@ export default function BuyersPage() {
                 <p className="text-sm text-muted-foreground">
                   {buyers.length === 0 ? "Add your first buyer to get started" : "Try adjusting your filters"}
                 </p>
+                {(Object.values(filters).some((v) => v !== "") || activeQuickFilters.length > 0 || selectedGroup) && (
+                  <Button variant="outline" className="mt-4" onClick={clearAllFilters}>
+                    Clear All Filters
+                  </Button>
+                )}
               </div>
             )}
           </div>
